@@ -644,6 +644,7 @@
       "cancelled": "Cancelled"
     },
     "startLabel": "Start",
+    "executorLabel": "Executor profile",
     "attachImage": "Attach image",
     "dropImagesHere": "Drop images here",
     "updating": "Updating...",
@@ -656,6 +657,18 @@
       "description": "You have unsaved changes. Are you sure you want to discard them?",
       "continueEditing": "Continue Editing",
       "discardChanges": "Discard Changes"
+    },
+    "swarm": {
+      "label": "Agent swarm",
+      "description": "Use a planner workspace to split this task into atomic child tasks and assign each one to a worker profile.",
+      "plannerLabel": "Planner profile",
+      "workersLabel": "Workers",
+      "workersHint": "Describe each worker by role or skills so the planner can route subtasks cleanly.",
+      "addWorker": "Add worker",
+      "workerN": "Worker {{count}}",
+      "rolePlaceholder": "Role / skills, e.g. frontend, React, UI polish",
+      "launch": "Launch swarm",
+      "starting": "Launching swarm..."
     }
   },
   "terminal": {

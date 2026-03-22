@@ -7,6 +7,8 @@ import { workspaceSummaryKeys } from '@/components/ui-new/hooks/useWorkspaces';
 import type {
   CreateTask,
   CreateAndStartTaskRequest,
+  CreateAndStartSwarmTaskRequest,
+  CreateAndStartSwarmTaskResponse,
   Task,
   TaskWithAttemptStatus,
   UpdateTask,
@@ -67,6 +69,20 @@ export function useTaskMutations(projectId?: string) {
     },
   });
 
+  const createAndStartSwarm = useMutation({
+    mutationFn: (data: CreateAndStartSwarmTaskRequest) =>
+      tasksApi.createAndStartSwarm(data),
+    onSuccess: (response: CreateAndStartSwarmTaskResponse) => {
+      invalidateQueries();
+      if (projectId) {
+        navigate(`${paths.task(projectId, response.epic_task.id)}/attempts/latest`);
+      }
+    },
+    onError: (err) => {
+      console.error('Failed to create and start swarm task:', err);
+    },
+  });
+
   const updateTask = useMutation({
     mutationFn: ({ taskId, data }: { taskId: string; data: UpdateTask }) =>
       tasksApi.update(taskId, data),
@@ -97,6 +113,7 @@ export function useTaskMutations(projectId?: string) {
   return {
     createTask,
     createAndStart,
+    createAndStartSwarm,
     updateTask,
     deleteTask,
   };

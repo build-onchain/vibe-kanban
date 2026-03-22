@@ -15,7 +15,7 @@ use axum::{
 use db::models::{
     image::TaskImage,
     repo::{Repo, RepoError},
-    task::{CreateTask, Task, TaskWithAttemptStatus, UpdateTask},
+    task::{CreateTask, Task, TaskStatus, TaskWithAttemptStatus, UpdateTask},
     workspace::{CreateWorkspace, Workspace},
     workspace_repo::{CreateWorkspaceRepo, WorkspaceRepo},
 };
@@ -34,7 +34,13 @@ use uuid::Uuid;
 
 use crate::{
     DeploymentImpl, error::ApiError, middleware::load_task_middleware,
-    routes::task_attempts::WorkspaceRepoInput,
+    routes::{
+        task_attempts::WorkspaceRepoInput,
+        task_swarm::{
+            SwarmPlan, SwarmTaskExecution, SwarmWorkerInput, build_swarm_plan,
+            child_task_description, planner_prompt, worker_prompt,
+        },
+    },
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -154,6 +160,28 @@ pub struct CreateAndStartTaskRequest {
     pub linked_issue: Option<LinkedIssueInfo>,
 }
 
+#[derive(Debug, Serialize, Deserialize, TS)]
+pub struct CreateAndStartSwarmTaskRequest {
+    pub task: CreateTask,
+    pub planner_profile_id: ExecutorProfileId,
+    pub repos: Vec<WorkspaceRepoInput>,
+    pub workers: Vec<SwarmWorkerInput>,
+    pub linked_issue: Option<LinkedIssueInfo>,
+}
+
+#[derive(Debug, Serialize, Deserialize, TS)]
+pub struct CreateAndStartSwarmTaskResponse {
+    pub epic_task: TaskWithAttemptStatus,
+    pub planner_workspace: Workspace,
+    pub plan: SwarmPlan,
+    pub spawned_tasks: Vec<SwarmTaskExecution>,
+}
+
+struct StartedWorkspace {
+    workspace: Workspace,
+    is_running: bool,
+}
+
 struct ImportedImage {
     image_id: Uuid,
     attachment_id: Uuid,
@@ -230,27 +258,17 @@ async fn import_issue_attachments(
     Ok(imported)
 }
 
-pub async fn create_task_and_start(
-    State(deployment): State<DeploymentImpl>,
-    Json(mut payload): Json<CreateAndStartTaskRequest>,
-) -> Result<ResponseJson<ApiResponse<TaskWithAttemptStatus>>, ApiError> {
-    if payload.repos.is_empty() {
-        return Err(ApiError::BadRequest(
-            "At least one repository is required".to_string(),
-        ));
-    }
-
-    let pool = &deployment.db().pool;
-
-    // Import images from linked remote issue before creating the task,
-    // so the description and image_ids are complete from the start.
-    if let Some(linked_issue) = &payload.linked_issue
+async fn enrich_task_from_linked_issue(
+    deployment: &DeploymentImpl,
+    task: &mut CreateTask,
+    linked_issue: Option<&LinkedIssueInfo>,
+) {
+    if let Some(linked_issue) = linked_issue
         && let Ok(client) = deployment.remote_client()
     {
         match import_issue_attachments(&client, deployment.image(), linked_issue.issue_id).await {
             Ok(imported) if !imported.is_empty() => {
-                // Replace attachment:// references with local .vibe-images/ paths
-                if let Some(desc) = &mut payload.task.description {
+                if let Some(desc) = &mut task.description {
                     for img in &imported {
                         let placeholder = format!("attachment://{}", img.attachment_id);
                         *desc = desc.replace(&placeholder, &img.vibe_path);
@@ -258,9 +276,9 @@ pub async fn create_task_and_start(
                 }
 
                 let imported_ids: Vec<Uuid> = imported.iter().map(|i| i.image_id).collect();
-                match &mut payload.task.image_ids {
+                match &mut task.image_ids {
                     Some(ids) => ids.extend(imported_ids),
-                    None => payload.task.image_ids = Some(imported_ids),
+                    None => task.image_ids = Some(imported_ids),
                 }
 
                 tracing::info!(
@@ -279,14 +297,13 @@ pub async fn create_task_and_start(
             }
         }
     }
+}
 
-    let task_id = Uuid::new_v4();
-    let task = Task::create(pool, &payload.task, task_id).await?;
-
-    if let Some(image_ids) = &payload.task.image_ids {
-        TaskImage::associate_many_dedup(pool, task.id, image_ids).await?;
-    }
-
+async fn track_task_created(
+    deployment: &DeploymentImpl,
+    task: &Task,
+    image_ids: Option<&Vec<Uuid>>,
+) {
     deployment
         .track_if_analytics_allowed(
             "task_created",
@@ -294,34 +311,45 @@ pub async fn create_task_and_start(
                 "task_id": task.id.to_string(),
                 "project_id": task.project_id,
                 "has_description": task.description.is_some(),
-                "has_images": payload.task.image_ids.is_some(),
+                "has_images": image_ids.is_some(),
             }),
         )
         .await;
+}
 
+async fn compute_agent_working_dir(
+    pool: &sqlx::SqlitePool,
+    repos: &[WorkspaceRepoInput],
+) -> Result<Option<String>, ApiError> {
+    if repos.len() != 1 {
+        return Ok(None);
+    }
+
+    let repo = Repo::find_by_id(pool, repos[0].repo_id)
+        .await?
+        .ok_or(RepoError::NotFound)?;
+
+    Ok(match repo.default_working_dir {
+        Some(subdir) => {
+            let path = PathBuf::from(&repo.name).join(&subdir);
+            Some(path.to_string_lossy().to_string())
+        }
+        None => Some(repo.name),
+    })
+}
+
+async fn create_workspace_for_task(
+    deployment: &DeploymentImpl,
+    task: &Task,
+    repos: &[WorkspaceRepoInput],
+) -> Result<Workspace, ApiError> {
+    let pool = &deployment.db().pool;
     let attempt_id = Uuid::new_v4();
     let git_branch_name = deployment
         .container()
         .git_branch_from_workspace(&attempt_id, &task.title)
         .await;
-
-    // Compute agent_working_dir based on repo count:
-    // - Single repo: join repo name with default_working_dir (if set), or just repo name
-    // - Multiple repos: use None (agent runs in workspace root)
-    let agent_working_dir = if payload.repos.len() == 1 {
-        let repo = Repo::find_by_id(pool, payload.repos[0].repo_id)
-            .await?
-            .ok_or(RepoError::NotFound)?;
-        match repo.default_working_dir {
-            Some(subdir) => {
-                let path = PathBuf::from(&repo.name).join(&subdir);
-                Some(path.to_string_lossy().to_string())
-            }
-            None => Some(repo.name),
-        }
-    } else {
-        None
-    };
+    let agent_working_dir = compute_agent_working_dir(pool, repos).await?;
 
     let workspace = Workspace::create(
         pool,
@@ -334,33 +362,96 @@ pub async fn create_task_and_start(
     )
     .await?;
 
-    let workspace_repos: Vec<CreateWorkspaceRepo> = payload
-        .repos
+    let workspace_repos: Vec<CreateWorkspaceRepo> = repos
         .iter()
-        .map(|r| CreateWorkspaceRepo {
-            repo_id: r.repo_id,
-            target_branch: r.target_branch.clone(),
+        .map(|repo| CreateWorkspaceRepo {
+            repo_id: repo.repo_id,
+            target_branch: repo.target_branch.clone(),
         })
         .collect();
-    WorkspaceRepo::create_many(&deployment.db().pool, workspace.id, &workspace_repos).await?;
+    WorkspaceRepo::create_many(pool, workspace.id, &workspace_repos).await?;
 
-    let is_attempt_running = deployment
-        .container()
-        .start_workspace(&workspace, payload.executor_profile_id.clone())
-        .await
+    Ok(workspace)
+}
+
+async fn start_task_workspace(
+    deployment: &DeploymentImpl,
+    task: &Task,
+    repos: &[WorkspaceRepoInput],
+    executor_profile_id: ExecutorProfileId,
+    prompt_override: Option<String>,
+) -> Result<StartedWorkspace, ApiError> {
+    let workspace = create_workspace_for_task(deployment, task, repos).await?;
+
+    let start_result = match prompt_override {
+        Some(prompt) => {
+            deployment
+                .container()
+                .start_workspace_with_prompt(&workspace, executor_profile_id.clone(), prompt)
+                .await
+        }
+        None => {
+            deployment
+                .container()
+                .start_workspace(&workspace, executor_profile_id.clone())
+                .await
+        }
+    };
+
+    let is_running = start_result
         .inspect_err(|err| tracing::error!("Failed to start task attempt: {}", err))
         .is_ok();
+
     deployment
         .track_if_analytics_allowed(
             "task_attempt_started",
             serde_json::json!({
                 "task_id": task.id.to_string(),
-                "executor": &payload.executor_profile_id.executor,
-                "variant": &payload.executor_profile_id.variant,
+                "executor": &executor_profile_id.executor,
+                "variant": &executor_profile_id.variant,
                 "workspace_id": workspace.id.to_string(),
+                "repository_count": repos.len(),
             }),
         )
         .await;
+
+    Ok(StartedWorkspace {
+        workspace,
+        is_running,
+    })
+}
+
+pub async fn create_task_and_start(
+    State(deployment): State<DeploymentImpl>,
+    Json(mut payload): Json<CreateAndStartTaskRequest>,
+) -> Result<ResponseJson<ApiResponse<TaskWithAttemptStatus>>, ApiError> {
+    if payload.repos.is_empty() {
+        return Err(ApiError::BadRequest(
+            "At least one repository is required".to_string(),
+        ));
+    }
+
+    let pool = &deployment.db().pool;
+    enrich_task_from_linked_issue(&deployment, &mut payload.task, payload.linked_issue.as_ref())
+        .await;
+
+    let task_id = Uuid::new_v4();
+    let task = Task::create(pool, &payload.task, task_id).await?;
+
+    if let Some(image_ids) = &payload.task.image_ids {
+        TaskImage::associate_many_dedup(pool, task.id, image_ids).await?;
+    }
+
+    track_task_created(&deployment, &task, payload.task.image_ids.as_ref()).await;
+
+    let started_workspace = start_task_workspace(
+        &deployment,
+        &task,
+        &payload.repos,
+        payload.executor_profile_id.clone(),
+        None,
+    )
+    .await?;
 
     let task = Task::find_by_id(pool, task.id)
         .await?
@@ -369,10 +460,118 @@ pub async fn create_task_and_start(
     tracing::info!("Started attempt for task {}", task.id);
     Ok(ResponseJson(ApiResponse::success(TaskWithAttemptStatus {
         task,
-        has_in_progress_attempt: is_attempt_running,
+        has_in_progress_attempt: started_workspace.is_running,
         last_attempt_failed: false,
         executor: payload.executor_profile_id.executor.to_string(),
     })))
+}
+
+pub async fn create_swarm_task_and_start(
+    State(deployment): State<DeploymentImpl>,
+    Json(mut payload): Json<CreateAndStartSwarmTaskRequest>,
+) -> Result<ResponseJson<ApiResponse<CreateAndStartSwarmTaskResponse>>, ApiError> {
+    if payload.repos.is_empty() {
+        return Err(ApiError::BadRequest(
+            "At least one repository is required".to_string(),
+        ));
+    }
+
+    if payload.workers.is_empty() {
+        return Err(ApiError::BadRequest(
+            "At least one swarm worker is required".to_string(),
+        ));
+    }
+
+    let pool = &deployment.db().pool;
+    enrich_task_from_linked_issue(&deployment, &mut payload.task, payload.linked_issue.as_ref())
+        .await;
+
+    let epic_task = Task::create(pool, &payload.task, Uuid::new_v4()).await?;
+
+    if let Some(image_ids) = &payload.task.image_ids {
+        TaskImage::associate_many_dedup(pool, epic_task.id, image_ids).await?;
+    }
+
+    track_task_created(&deployment, &epic_task, payload.task.image_ids.as_ref()).await;
+
+    let plan = build_swarm_plan(&epic_task, &payload.workers);
+    let planner_started_workspace = start_task_workspace(
+        &deployment,
+        &epic_task,
+        &payload.repos,
+        payload.planner_profile_id.clone(),
+        Some(planner_prompt(&epic_task, &payload.workers, &plan)),
+    )
+    .await?;
+
+    let mut spawned_tasks = Vec::with_capacity(plan.subtasks.len());
+
+    for planned_subtask in &plan.subtasks {
+        let child_task = Task::create(
+            pool,
+            &CreateTask {
+                project_id: epic_task.project_id,
+                title: planned_subtask.title.clone(),
+                description: Some(child_task_description(&epic_task, planned_subtask)),
+                status: Some(TaskStatus::Todo),
+                parent_workspace_id: Some(planner_started_workspace.workspace.id),
+                image_ids: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await?;
+
+        track_task_created(&deployment, &child_task, None).await;
+
+        let child_started_workspace = start_task_workspace(
+            &deployment,
+            &child_task,
+            &payload.repos,
+            planned_subtask.executor_profile_id.clone(),
+            Some(worker_prompt(&epic_task, planned_subtask)),
+        )
+        .await?;
+
+        spawned_tasks.push(SwarmTaskExecution {
+            task: child_task,
+            workspace_id: child_started_workspace.workspace.id.to_string(),
+            assigned_role: planned_subtask.assigned_role.clone(),
+            executor_profile_id: planned_subtask.executor_profile_id.clone(),
+            rationale: planned_subtask.rationale.clone(),
+        });
+    }
+
+    deployment
+        .track_if_analytics_allowed(
+            "task_swarm_started",
+            serde_json::json!({
+                "task_id": epic_task.id.to_string(),
+                "planner_executor": &payload.planner_profile_id.executor,
+                "planner_variant": &payload.planner_profile_id.variant,
+                "workspace_id": planner_started_workspace.workspace.id.to_string(),
+                "worker_count": payload.workers.len(),
+                "planned_subtasks": plan.subtasks.len(),
+            }),
+        )
+        .await;
+
+    let epic_task = Task::find_by_id(pool, epic_task.id)
+        .await?
+        .ok_or(ApiError::Database(SqlxError::RowNotFound))?;
+
+    Ok(ResponseJson(ApiResponse::success(
+        CreateAndStartSwarmTaskResponse {
+            epic_task: TaskWithAttemptStatus {
+                task: epic_task,
+                has_in_progress_attempt: planner_started_workspace.is_running,
+                last_attempt_failed: false,
+                executor: payload.planner_profile_id.executor.to_string(),
+            },
+            planner_workspace: planner_started_workspace.workspace,
+            plan,
+            spawned_tasks,
+        },
+    )))
 }
 
 pub async fn update_task(
@@ -533,6 +732,7 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .route("/", get(get_tasks).post(create_task))
         .route("/stream/ws", get(stream_tasks_ws))
         .route("/create-and-start", post(create_task_and_start))
+        .route("/create-and-start-swarm", post(create_swarm_task_and_start))
         .nest("/{task_id}", task_id_router);
 
     // mount under /projects/:project_id/tasks

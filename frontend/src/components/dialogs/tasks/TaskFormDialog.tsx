@@ -4,7 +4,7 @@ import NiceModal, { useModal } from '@ebay/nice-modal-react';
 import { defineModal } from '@/lib/modals';
 import { useDropzone } from 'react-dropzone';
 import { useForm, useStore } from '@tanstack/react-form';
-import { Image as ImageIcon } from 'lucide-react';
+import { Image as ImageIcon, Plus, X } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -73,6 +73,10 @@ export type TaskFormDialogProps =
     };
 
 type RepoBranch = { repoId: string; branch: string };
+type SwarmWorkerForm = {
+  role: string;
+  executorProfileId: ExecutorProfileId | null;
+};
 
 type TaskFormValues = {
   title: string;
@@ -81,14 +85,31 @@ type TaskFormValues = {
   executorProfileId: ExecutorProfileId | null;
   repoBranches: RepoBranch[];
   autoStart: boolean;
+  swarmEnabled: boolean;
+  swarmWorkers: SwarmWorkerForm[];
 };
+
+function createDefaultSwarmWorkers(
+  baseProfile: ExecutorProfileId | null
+): SwarmWorkerForm[] {
+  return [
+    {
+      role: 'implementation, backend, core changes',
+      executorProfileId: baseProfile,
+    },
+    {
+      role: 'testing, validation, review',
+      executorProfileId: baseProfile,
+    },
+  ];
+}
 
 const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
   const { mode, projectId } = props;
   const editMode = mode === 'edit';
   const modal = useModal();
   const { t } = useTranslation(['tasks', 'common']);
-  const { createTask, createAndStart, updateTask } =
+  const { createTask, createAndStart, createAndStartSwarm, updateTask } =
     useTaskMutations(projectId);
   const { system, profiles, loading: userSystemLoading } = useUserSystem();
   const { upload, uploadForTask } = useImageUpload();
@@ -126,6 +147,7 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
   // Get default form values based on mode
   const defaultValues = useMemo((): TaskFormValues => {
     const baseProfile = system.config?.executor_profile || null;
+    const defaultSwarmWorkers = createDefaultSwarmWorkers(baseProfile);
 
     switch (mode) {
       case 'edit':
@@ -136,6 +158,8 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
           executorProfileId: baseProfile,
           repoBranches: defaultRepoBranches,
           autoStart: false,
+          swarmEnabled: false,
+          swarmWorkers: defaultSwarmWorkers,
         };
 
       case 'duplicate':
@@ -146,6 +170,8 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
           executorProfileId: baseProfile,
           repoBranches: defaultRepoBranches,
           autoStart: true,
+          swarmEnabled: false,
+          swarmWorkers: defaultSwarmWorkers,
         };
 
       case 'subtask':
@@ -158,6 +184,8 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
           executorProfileId: baseProfile,
           repoBranches: defaultRepoBranches,
           autoStart: true,
+          swarmEnabled: false,
+          swarmWorkers: defaultSwarmWorkers,
         };
     }
   }, [mode, props, system.config?.executor_profile, defaultRepoBranches]);
@@ -197,15 +225,31 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
           repo_id: rb.repoId,
           target_branch: rb.branch,
         }));
-        await createAndStart.mutateAsync(
-          {
-            task,
-            executor_profile_id: value.executorProfileId!,
-            repos,
-            linked_issue: null,
-          },
-          { onSuccess: () => modal.remove() }
-        );
+        if (value.swarmEnabled) {
+          await createAndStartSwarm.mutateAsync(
+            {
+              task,
+              planner_profile_id: value.executorProfileId!,
+              repos,
+              workers: value.swarmWorkers.map((worker) => ({
+                role: worker.role.trim(),
+                executor_profile_id: worker.executorProfileId!,
+              })),
+              linked_issue: null,
+            },
+            { onSuccess: () => modal.remove() }
+          );
+        } else {
+          await createAndStart.mutateAsync(
+            {
+              task,
+              executor_profile_id: value.executorProfileId!,
+              repos,
+              linked_issue: null,
+            },
+            { onSuccess: () => modal.remove() }
+          );
+        }
       } else {
         await createTask.mutateAsync(task, { onSuccess: () => modal.remove() });
       }
@@ -216,6 +260,17 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
     if (!value.title.trim().length) return 'need title';
     if (value.autoStart && !forceCreateOnlyRef.current) {
       if (!value.executorProfileId) return 'need executor profile';
+      if (value.swarmEnabled) {
+        if (value.swarmWorkers.length === 0) return 'need swarm workers';
+        if (
+          value.swarmWorkers.some(
+            (worker) =>
+              !worker.role.trim().length || worker.executorProfileId === null
+          )
+        ) {
+          return 'need swarm worker roles';
+        }
+      }
       if (
         value.repoBranches.length === 0 ||
         value.repoBranches.some((rb) => !rb.branch)
@@ -513,60 +568,223 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
                         : 'opacity-0 pointer-events-none'
                     )}
                   >
-                    <div className="flex items-center gap-2">
-                      <form.Field name="executorProfileId">
-                        {(field) => (
-                          <ExecutorProfileSelector
-                            profiles={profiles}
-                            selectedProfile={field.state.value}
-                            onProfileSelect={(profile) =>
-                              field.handleChange(profile)
-                            }
-                            disabled={
-                              isSubmitting || !autoStartField.state.value
-                            }
-                            showLabel={false}
-                            className="flex items-center gap-2 flex-row flex-[2] min-w-0"
-                            itemClassName="flex-1 min-w-0"
-                          />
-                        )}
-                      </form.Field>
-                      {isSingleRepo && (
-                        <form.Field name="repoBranches">
-                          {(field) => {
-                            const config = repoBranchConfigs[0];
-                            const selectedBranch =
-                              field.state.value.find(
-                                (v) => v.repoId === config.repoId
-                              )?.branch ?? config.targetBranch;
-                            return (
-                              <div
-                                className={cn(
-                                  'flex-1 min-w-0',
-                                  isSubmitting &&
-                                    'opacity-50 pointer-events-none'
+                    <form.Field name="swarmEnabled">
+                      {(swarmField) => (
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between gap-3 rounded-none border p-3">
+                            <div className="space-y-1">
+                              <p className="text-sm font-medium">
+                                {t('taskFormDialog.swarm.label')}
+                              </p>
+                              <p className="text-xs text-muted-foreground">
+                                {t('taskFormDialog.swarm.description')}
+                              </p>
+                            </div>
+                            <Switch
+                              id="swarm-switch"
+                              checked={swarmField.state.value}
+                              onCheckedChange={(checked) =>
+                                swarmField.handleChange(checked)
+                              }
+                              disabled={
+                                isSubmitting || !autoStartField.state.value
+                              }
+                              aria-label={t('taskFormDialog.swarm.label')}
+                            />
+                          </div>
+
+                          <div className="space-y-3">
+                            <div className="space-y-2">
+                              <Label className="text-sm font-medium">
+                                {swarmField.state.value
+                                  ? t('taskFormDialog.swarm.plannerLabel')
+                                  : t('taskFormDialog.executorLabel')}
+                              </Label>
+                              <form.Field name="executorProfileId">
+                                {(field) => (
+                                  <ExecutorProfileSelector
+                                    profiles={profiles}
+                                    selectedProfile={field.state.value}
+                                    onProfileSelect={(profile) =>
+                                      field.handleChange(profile)
+                                    }
+                                    disabled={
+                                      isSubmitting || !autoStartField.state.value
+                                    }
+                                    showLabel={false}
+                                    className="flex items-center gap-2 flex-col sm:flex-row min-w-0"
+                                    itemClassName="flex-1 min-w-0"
+                                  />
                                 )}
-                              >
-                                <BranchSelector
-                                  branches={config.branches}
-                                  selectedBranch={selectedBranch}
-                                  onBranchSelect={(branch) => {
-                                    field.handleChange([
-                                      { repoId: config.repoId, branch },
-                                    ]);
-                                  }}
-                                  placeholder={
-                                    branchesLoading
-                                      ? t('createAttemptDialog.loadingBranches')
-                                      : t('createAttemptDialog.selectBranch')
-                                  }
-                                />
-                              </div>
-                            );
-                          }}
-                        </form.Field>
+                              </form.Field>
+                            </div>
+
+                            {swarmField.state.value && (
+                              <form.Field name="swarmWorkers">
+                                {(field) => (
+                                  <div className="space-y-3 rounded-none border p-3">
+                                    <div className="flex items-center justify-between gap-3">
+                                      <div>
+                                        <p className="text-sm font-medium">
+                                          {t('taskFormDialog.swarm.workersLabel')}
+                                        </p>
+                                        <p className="text-xs text-muted-foreground">
+                                          {t('taskFormDialog.swarm.workersHint')}
+                                        </p>
+                                      </div>
+                                      <Button
+                                        type="button"
+                                        variant="outline"
+                                        size="sm"
+                                        onClick={() =>
+                                          field.handleChange([
+                                            ...field.state.value,
+                                            {
+                                              role: '',
+                                              executorProfileId:
+                                                field.state.value[0]
+                                                  ?.executorProfileId ??
+                                                system.config?.executor_profile ??
+                                                null,
+                                            },
+                                          ])
+                                        }
+                                        disabled={isSubmitting}
+                                      >
+                                        <Plus className="mr-2 h-3.5 w-3.5" />
+                                        {t('taskFormDialog.swarm.addWorker')}
+                                      </Button>
+                                    </div>
+
+                                    <div className="space-y-3">
+                                      {field.state.value.map((worker, index) => (
+                                        <div
+                                          key={`swarm-worker-${index}`}
+                                          className="space-y-2 rounded-none border p-3"
+                                        >
+                                          <div className="flex items-center justify-between gap-3">
+                                            <Label className="text-xs uppercase tracking-wide text-muted-foreground">
+                                              {t('taskFormDialog.swarm.workerN', {
+                                                count: index + 1,
+                                              })}
+                                            </Label>
+                                            <Button
+                                              type="button"
+                                              variant="ghost"
+                                              size="sm"
+                                              onClick={() =>
+                                                field.handleChange(
+                                                  field.state.value.filter(
+                                                    (_, workerIndex) =>
+                                                      workerIndex !== index
+                                                  )
+                                                )
+                                              }
+                                              disabled={
+                                                isSubmitting ||
+                                                field.state.value.length === 1
+                                              }
+                                            >
+                                              <X className="h-3.5 w-3.5" />
+                                            </Button>
+                                          </div>
+
+                                          <Input
+                                            value={worker.role}
+                                            onChange={(e) => {
+                                              const nextWorkers =
+                                                field.state.value.map(
+                                                  (entry, workerIndex) =>
+                                                    workerIndex === index
+                                                      ? {
+                                                          ...entry,
+                                                          role: e.target.value,
+                                                        }
+                                                      : entry
+                                                );
+                                              field.handleChange(nextWorkers);
+                                            }}
+                                            placeholder={t(
+                                              'taskFormDialog.swarm.rolePlaceholder'
+                                            )}
+                                            disabled={isSubmitting}
+                                          />
+
+                                          <ExecutorProfileSelector
+                                            profiles={profiles}
+                                            selectedProfile={
+                                              worker.executorProfileId
+                                            }
+                                            onProfileSelect={(profile) => {
+                                              const nextWorkers =
+                                                field.state.value.map(
+                                                  (entry, workerIndex) =>
+                                                    workerIndex === index
+                                                      ? {
+                                                          ...entry,
+                                                          executorProfileId:
+                                                            profile,
+                                                        }
+                                                      : entry
+                                                );
+                                              field.handleChange(nextWorkers);
+                                            }}
+                                            disabled={isSubmitting}
+                                            showLabel={false}
+                                            className="flex items-center gap-2 flex-col sm:flex-row min-w-0"
+                                            itemClassName="flex-1 min-w-0"
+                                          />
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </form.Field>
+                            )}
+
+                            {isSingleRepo && (
+                              <form.Field name="repoBranches">
+                                {(field) => {
+                                  const config = repoBranchConfigs[0];
+                                  const selectedBranch =
+                                    field.state.value.find(
+                                      (v) => v.repoId === config.repoId
+                                    )?.branch ?? config.targetBranch;
+                                  return (
+                                    <div
+                                      className={cn(
+                                        'min-w-0',
+                                        isSubmitting &&
+                                          'opacity-50 pointer-events-none'
+                                      )}
+                                    >
+                                      <BranchSelector
+                                        branches={config.branches}
+                                        selectedBranch={selectedBranch}
+                                        onBranchSelect={(branch) => {
+                                          field.handleChange([
+                                            { repoId: config.repoId, branch },
+                                          ]);
+                                        }}
+                                        placeholder={
+                                          branchesLoading
+                                            ? t(
+                                                'createAttemptDialog.loadingBranches'
+                                              )
+                                            : t(
+                                                'createAttemptDialog.selectBranch'
+                                              )
+                                        }
+                                      />
+                                    </div>
+                                  );
+                                }}
+                              </form.Field>
+                            )}
+                          </div>
+                        </div>
                       )}
-                    </div>
+                    </form.Field>
                     {!isSingleRepo && (
                       <form.Field name="repoBranches">
                         {(field) => {
@@ -664,9 +882,13 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
                       : t('taskFormDialog.updateTask')
                     : isSubmitting
                       ? values.autoStart
-                        ? t('taskFormDialog.starting')
+                        ? values.swarmEnabled
+                          ? t('taskFormDialog.swarm.starting')
+                          : t('taskFormDialog.starting')
                         : t('taskFormDialog.creating')
-                      : t('taskFormDialog.create');
+                      : values.autoStart && values.swarmEnabled
+                        ? t('taskFormDialog.swarm.launch')
+                        : t('taskFormDialog.create');
 
                   return (
                     <Button onClick={form.handleSubmit} disabled={!canSubmit}>

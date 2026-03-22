@@ -567,6 +567,7 @@
       "cancelled": "キャンセル"
     },
     "startLabel": "開始",
+    "executorLabel": "Executor profile",
     "attachImage": "画像を添付",
     "dropImagesHere": "画像をここにドロップ",
     "updating": "更新中...",
@@ -579,6 +580,18 @@
       "description": "未保存の変更があります。本当に破棄してもよろしいですか？",
       "continueEditing": "編集を続ける",
       "discardChanges": "変更を破棄"
+    },
+    "swarm": {
+      "label": "Agent swarm",
+      "description": "Use a planner workspace to split this task into atomic child tasks and assign each one to a worker profile.",
+      "plannerLabel": "Planner profile",
+      "workersLabel": "Workers",
+      "workersHint": "Describe each worker by role or skills so the planner can route subtasks cleanly.",
+      "addWorker": "Add worker",
+      "workerN": "Worker {{count}}",
+      "rolePlaceholder": "Role / skills, e.g. frontend, React, UI polish",
+      "launch": "Launch swarm",
+      "starting": "Launching swarm..."
     }
   },
   "terminal": {

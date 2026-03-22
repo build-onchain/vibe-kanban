@@ -567,6 +567,7 @@
       "cancelled": "已取消"
     },
     "startLabel": "開始",
+    "executorLabel": "Executor profile",
     "attachImage": "附加圖片",
     "dropImagesHere": "將圖片放在這裡",
     "updating": "更新中...",
@@ -579,6 +580,18 @@
       "description": "您有未儲存的變更。確定要放棄嗎？",
       "continueEditing": "繼續編輯",
       "discardChanges": "放棄變更"
+    },
+    "swarm": {
+      "label": "Agent swarm",
+      "description": "Use a planner workspace to split this task into atomic child tasks and assign each one to a worker profile.",
+      "plannerLabel": "Planner profile",
+      "workersLabel": "Workers",
+      "workersHint": "Describe each worker by role or skills so the planner can route subtasks cleanly.",
+      "addWorker": "Add worker",
+      "workerN": "Worker {{count}}",
+      "rolePlaceholder": "Role / skills, e.g. frontend, React, UI polish",
+      "launch": "Launch swarm",
+      "starting": "Launching swarm..."
     }
   },
   "terminal": {

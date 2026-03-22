@@ -10,6 +10,8 @@ import {
   CreatePrApiRequest,
   CreateTask,
   CreateAndStartTaskRequest,
+  CreateAndStartSwarmTaskRequest,
+  CreateAndStartSwarmTaskResponse,
   CreateTaskAttemptBody,
   CreateTag,
   DirectoryListResponse,
@@ -353,6 +355,16 @@ export const tasksApi = {
       body: JSON.stringify(data),
     });
     return handleApiResponse<TaskWithAttemptStatus>(response);
+  },
+
+  createAndStartSwarm: async (
+    data: CreateAndStartSwarmTaskRequest
+  ): Promise<CreateAndStartSwarmTaskResponse> => {
+    const response = await makeRequest(`/api/tasks/create-and-start-swarm`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+    return handleApiResponse<CreateAndStartSwarmTaskResponse>(response);
   },
 
   update: async (taskId: string, data: UpdateTask): Promise<Task> => {
