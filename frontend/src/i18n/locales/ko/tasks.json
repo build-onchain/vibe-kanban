@@ -567,6 +567,7 @@
       "cancelled": "취소됨"
     },
     "startLabel": "시작",
+    "executorLabel": "Executor profile",
     "attachImage": "이미지 첨부",
     "dropImagesHere": "여기에 이미지를 드롭하세요",
     "updating": "업데이트 중...",
@@ -579,6 +580,18 @@
       "description": "저장하지 않은 변경사항이 있습니다. 정말 버리시겠습니까?",
       "continueEditing": "계속 수정",
       "discardChanges": "변경사항 버리기"
+    },
+    "swarm": {
+      "label": "Agent swarm",
+      "description": "Use a planner workspace to split this task into atomic child tasks and assign each one to a worker profile.",
+      "plannerLabel": "Planner profile",
+      "workersLabel": "Workers",
+      "workersHint": "Describe each worker by role or skills so the planner can route subtasks cleanly.",
+      "addWorker": "Add worker",
+      "workerN": "Worker {{count}}",
+      "rolePlaceholder": "Role / skills, e.g. frontend, React, UI polish",
+      "launch": "Launch swarm",
+      "starting": "Launching swarm..."
     }
   },
   "terminal": {

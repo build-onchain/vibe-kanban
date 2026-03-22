@@ -27,6 +27,7 @@ pub mod search;
 pub mod sessions;
 pub mod tags;
 pub mod task_attempts;
+pub mod task_swarm;
 pub mod tasks;
 pub mod terminal;
 

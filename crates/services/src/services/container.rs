@@ -1114,14 +1114,26 @@ pub trait ContainerService {
         workspace: &Workspace,
         executor_profile_id: ExecutorProfileId,
     ) -> Result<ExecutionProcess, ContainerError> {
-        // Create container
-        self.create(workspace).await?;
-
-        // Get parent task
         let task = workspace
             .parent_task(&self.db().pool)
             .await?
             .ok_or(SqlxError::RowNotFound)?;
+        self.start_workspace_with_prompt(
+            workspace,
+            executor_profile_id,
+            task.to_prompt(),
+        )
+        .await
+    }
+
+    async fn start_workspace_with_prompt(
+        &self,
+        workspace: &Workspace,
+        executor_profile_id: ExecutorProfileId,
+        prompt: String,
+    ) -> Result<ExecutionProcess, ContainerError> {
+        // Create container
+        self.create(workspace).await?;
 
         let repos = WorkspaceRepo::find_repos_for_workspace(&self.db().pool, workspace.id).await?;
 
@@ -1139,8 +1151,6 @@ pub trait ContainerService {
             workspace.id,
         )
         .await?;
-
-        let prompt = task.to_prompt();
 
         let repos_with_setup: Vec<_> = repos.iter().filter(|r| r.setup_script.is_some()).collect();
 

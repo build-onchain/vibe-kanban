@@ -306,6 +306,10 @@ export type LinkedIssueInfo = { remote_project_id: string, issue_id: string, };
 
 export type CreateAndStartTaskRequest = { task: CreateTask, executor_profile_id: ExecutorProfileId, repos: Array<WorkspaceRepoInput>, linked_issue: LinkedIssueInfo | null, };
 
+export type CreateAndStartSwarmTaskRequest = { task: CreateTask, planner_profile_id: ExecutorProfileId, repos: Array<WorkspaceRepoInput>, workers: Array<SwarmWorkerInput>, linked_issue: LinkedIssueInfo | null, };
+
+export type CreateAndStartSwarmTaskResponse = { epic_task: TaskWithAttemptStatus, planner_workspace: Workspace, plan: SwarmPlan, spawned_tasks: Array<SwarmTaskExecution>, };
+
 export type CreatePrApiRequest = { title: string, body: string | null, target_branch: string | null, draft: boolean | null, repo_id: string, auto_generate_description: boolean, };
 
 export type ImageResponse = { id: string, file_path: string, original_name: string, mime_type: string | null, size_bytes: bigint, hash: string, created_at: string, updated_at: string, };
@@ -534,6 +538,14 @@ executor: BaseCodingAgent,
  * Optional variant name (e.g., "PLAN", "ROUTER")
  */
 variant: string | null, };
+
+export type SwarmWorkerInput = { role: string, executor_profile_id: ExecutorProfileId, };
+
+export type SwarmAssignmentPlan = { title: string, description: string, assigned_role: string, executor_profile_id: ExecutorProfileId, rationale: string, };
+
+export type SwarmPlan = { summary: string, subtasks: Array<SwarmAssignmentPlan>, };
+
+export type SwarmTaskExecution = { task: Task, workspace_id: string, assigned_role: string, executor_profile_id: ExecutorProfileId, rationale: string, };
 
 export type ExecutorConfig = { [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } };
 
