@@ -65,6 +65,10 @@ export function createBlankCreateFormData(
     assigneeIds: [],
     tagIds: [],
     createDraftWorkspace: false,
+    autoStart: false,
+    executorProfileId: null,
+    swarmEnabled: false,
+    swarmWorkers: [],
   };
 }
 
@@ -188,6 +192,10 @@ export function selectDisplayData({
     assigneeIds: currentAssigneeIds,
     tagIds: currentTagIds,
     createDraftWorkspace: false,
+    autoStart: false,
+    executorProfileId: null,
+    swarmEnabled: false,
+    swarmWorkers: [],
   };
 }
 
@@ -219,6 +227,8 @@ export function selectIsCreateDraftDirty({
       createModeDefaults.tagIds
     ) ||
     state.createFormData.createDraftWorkspace !==
-      createModeDefaults.createDraftWorkspace
+      createModeDefaults.createDraftWorkspace ||
+    state.createFormData.autoStart !== createModeDefaults.autoStart ||
+    state.createFormData.swarmEnabled !== createModeDefaults.swarmEnabled
   );
 }

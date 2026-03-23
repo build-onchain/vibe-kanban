@@ -6,9 +6,13 @@ import {
   useReducer,
   useRef,
 } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useDropzone } from 'react-dropzone';
 import { useTranslation } from 'react-i18next';
-import type { OrganizationMemberWithProfile } from 'shared/types';
+import type {
+  ExecutorProfileId,
+  OrganizationMemberWithProfile,
+} from 'shared/types';
 import type { IssuePriority } from 'shared/remote-types';
 import { useDebouncedCallback } from '@/hooks/useDebouncedCallback';
 import { useProjectContext } from '@/contexts/remote/ProjectContext';
@@ -18,11 +22,13 @@ import { useProjectWorkspaceCreateDraft } from '@/hooks/useProjectWorkspaceCreat
 import {
   KanbanIssuePanel,
   type IssueFormData,
+  type SwarmWorkerForm,
 } from '@/components/ui-new/views/KanbanIssuePanel';
 import { useActions } from '@/contexts/ActionsContext';
 import { useUserContext } from '@/contexts/remote/UserContext';
 import { useWorkspaceContext } from '@/contexts/WorkspaceContext';
 import { CommandBarDialog } from '@/components/ui-new/dialogs/CommandBarDialog';
+import { useUserSystem } from '@/components/ConfigProvider';
 import { getWorkspaceDefaults } from '@/lib/workspaceDefaults';
 import {
   buildLinkedIssueCreateState,
@@ -31,6 +37,7 @@ import {
 } from '@/lib/workspaceCreateState';
 import { ScratchType, type DraftIssueData } from 'shared/types';
 import { useScratch } from '@/hooks/useScratch';
+import { attemptsApi, tasksApi } from '@/lib/api';
 import {
   createBlankCreateFormData,
   createInitialKanbanIssuePanelFormState,
@@ -41,8 +48,33 @@ import {
 import { useAzureAttachments } from '@/hooks/useAzureAttachments';
 import { commitIssueAttachments, deleteAttachment } from '@/lib/remoteApi';
 import { extractAttachmentIds } from '@/lib/attachmentUtils';
+import { taskKeys } from '@/hooks/useTask';
+import { workspaceSummaryKeys } from '@/components/ui-new/hooks/useWorkspaces';
 
 const DRAFT_ISSUE_ID = '00000000-0000-0000-0000-000000000002';
+
+function createDefaultSwarmWorkers(
+  baseProfile: ExecutorProfileId | null
+): SwarmWorkerForm[] {
+  return [
+    {
+      role: 'implementation, backend, core changes',
+      executorProfileId: baseProfile,
+    },
+    {
+      role: 'testing, validation, review',
+      executorProfileId: baseProfile,
+    },
+  ];
+}
+
+function hasInvalidSwarmWorkers(workers: SwarmWorkerForm[]): boolean {
+  if (workers.length === 0) return true;
+
+  return workers.some(
+    (worker) => !worker.role.trim() || worker.executorProfileId === null
+  );
+}
 
 /**
  * KanbanIssuePanelContainer manages the issue detail/create panel.
@@ -51,6 +83,7 @@ const DRAFT_ISSUE_ID = '00000000-0000-0000-0000-000000000002';
  */
 export function KanbanIssuePanelContainer() {
   const { t } = useTranslation('common');
+  const queryClient = useQueryClient();
   // Navigation hook - URL is single source of truth
   const {
     issueId: selectedKanbanIssueId,
@@ -67,6 +100,12 @@ export function KanbanIssuePanelContainer() {
   const { openWorkspaceCreateFromState } = useProjectWorkspaceCreateDraft();
   const { workspaces } = useUserContext();
   const { activeWorkspaces, archivedWorkspaces } = useWorkspaceContext();
+  const { system, profiles } = useUserSystem();
+  const defaultExecutorProfile = system.config?.executor_profile ?? null;
+  const defaultSwarmWorkers = useMemo(
+    () => createDefaultSwarmWorkers(defaultExecutorProfile),
+    [defaultExecutorProfile]
+  );
 
   // Build set of local workspace IDs that exist on this machine
   const localWorkspaceIds = useMemo(
@@ -212,11 +251,17 @@ export function KanbanIssuePanelContainer() {
       assigneeIds: [...(kanbanCreateDefaultAssigneeIds ?? [])],
       tagIds: [],
       createDraftWorkspace: false,
+      autoStart: false,
+      executorProfileId: defaultExecutorProfile,
+      swarmEnabled: false,
+      swarmWorkers: defaultSwarmWorkers,
     }),
     [
       defaultStatusId,
       kanbanCreateDefaultPriority,
       kanbanCreateDefaultAssigneeIds,
+      defaultExecutorProfile,
+      defaultSwarmWorkers,
     ]
   );
 
@@ -295,6 +340,7 @@ export function KanbanIssuePanelContainer() {
   }, [displayData.assigneeIds, membersWithProfilesById]);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   // Save status for description (shown in WYSIWYG toolbar)
   const [descriptionSaveStatus, setDescriptionSaveStatus] = useState<
@@ -355,6 +401,10 @@ export function KanbanIssuePanelContainer() {
     setDescriptionSaveStatus('idle');
   }, [selectedKanbanIssueId, kanbanCreateMode]);
 
+  useEffect(() => {
+    setSubmitError(null);
+  }, [selectedKanbanIssueId, kanbanCreateMode]);
+
   // Helper to build form data from a draft issue scratch
   const restoreFromScratch = useCallback(
     (scratchData: DraftIssueData): IssueFormData => {
@@ -367,9 +417,13 @@ export function KanbanIssuePanelContainer() {
         assigneeIds: scratchData.assignee_ids,
         tagIds: scratchData.tag_ids,
         createDraftWorkspace: scratchData.create_draft_workspace,
+        autoStart: false,
+        executorProfileId: defaultExecutorProfile,
+        swarmEnabled: false,
+        swarmWorkers: defaultSwarmWorkers,
       };
     },
-    [statuses, defaultStatusId]
+    [statuses, defaultStatusId, defaultExecutorProfile, defaultSwarmWorkers]
   );
 
   const createFormFallback = useMemo(
@@ -612,6 +666,7 @@ export function KanbanIssuePanelContainer() {
     ) => {
       // Create mode: update createFormData for all fields
       if (kanbanCreateMode || !selectedKanbanIssueId) {
+        setSubmitError(null);
         if (isDraftAutosavePaused) {
           dispatchFormState({
             type: 'setDraftAutosavePaused',
@@ -680,6 +735,60 @@ export function KanbanIssuePanelContainer() {
                 assigneeIds,
               });
             },
+          });
+          return;
+        }
+
+        if (field === 'autoStart') {
+          const nextAutoStart = Boolean(value);
+          dispatchFormState({
+            type: 'patchCreateFormData',
+            patch: {
+              autoStart: nextAutoStart,
+              createDraftWorkspace: nextAutoStart
+                ? false
+                : (createFormData?.createDraftWorkspace ?? false),
+              swarmEnabled: nextAutoStart
+                ? (createFormData?.swarmEnabled ?? false)
+                : false,
+            },
+            fallback: createFormFallback,
+          });
+          return;
+        }
+
+        if (field === 'createDraftWorkspace') {
+          const nextCreateDraftWorkspace = Boolean(value);
+          dispatchFormState({
+            type: 'patchCreateFormData',
+            patch: {
+              createDraftWorkspace: nextCreateDraftWorkspace,
+              autoStart: nextCreateDraftWorkspace
+                ? false
+                : (createFormData?.autoStart ?? false),
+              swarmEnabled: nextCreateDraftWorkspace
+                ? false
+                : (createFormData?.swarmEnabled ?? false),
+            },
+            fallback: createFormFallback,
+          });
+          return;
+        }
+
+        if (field === 'swarmEnabled') {
+          const nextSwarmEnabled = Boolean(value);
+          dispatchFormState({
+            type: 'patchCreateFormData',
+            patch: {
+              swarmEnabled: nextSwarmEnabled,
+              autoStart: nextSwarmEnabled
+                ? true
+                : (createFormData?.autoStart ?? false),
+              createDraftWorkspace: nextSwarmEnabled
+                ? false
+                : (createFormData?.createDraftWorkspace ?? false),
+            },
+            fallback: createFormFallback,
           });
           return;
         }
@@ -770,8 +879,38 @@ export function KanbanIssuePanelContainer() {
     if (!displayData.title.trim()) return;
 
     setIsSubmitting(true);
+    setSubmitError(null);
     try {
       if (mode === 'create') {
+        let workspaceDefaults = null;
+        if (displayData.autoStart) {
+          if (!displayData.executorProfileId) {
+            setSubmitError(t('kanban.autoStartRequiresProfile'));
+            return;
+          }
+
+          if (
+            displayData.swarmEnabled &&
+            hasInvalidSwarmWorkers(displayData.swarmWorkers)
+          ) {
+            setSubmitError(t('kanban.swarm.invalidWorkers'));
+            return;
+          }
+
+          workspaceDefaults = await getWorkspaceDefaults(
+            workspaces,
+            localWorkspaceIds
+          );
+
+          if (
+            !workspaceDefaults?.project_id ||
+            workspaceDefaults.preferredRepos.length === 0
+          ) {
+            setSubmitError(t('kanban.autoStartRequiresWorkspaceDefaults'));
+            return;
+          }
+        }
+
         // Create new issue at the top of the column
         const statusIssues = issues.filter(
           (i) => i.status_id === displayData.statusId
@@ -841,6 +980,105 @@ export function KanbanIssuePanelContainer() {
           });
         }
 
+        if (displayData.autoStart && workspaceDefaults) {
+          const repos = workspaceDefaults.preferredRepos.map((repo) => ({
+            repo_id: repo.repo_id,
+            target_branch: repo.target_branch ?? 'main',
+          }));
+          const linkedIssue = {
+            remote_project_id: projectId,
+            issue_id: syncedIssue.id,
+          };
+
+          if (displayData.swarmEnabled) {
+            const swarmResult = await tasksApi.createAndStartSwarm({
+              task: {
+                project_id: workspaceDefaults.project_id,
+                title: displayData.title,
+                description: displayData.description,
+                status: null,
+                parent_workspace_id: null,
+                image_ids: null,
+              },
+              planner_profile_id: displayData.executorProfileId!,
+              repos,
+              workers: displayData.swarmWorkers.map((worker) => ({
+                role: worker.role.trim(),
+                executor_profile_id: worker.executorProfileId!,
+              })),
+              linked_issue: linkedIssue,
+            });
+
+            await attemptsApi.linkToIssue(
+              swarmResult.planner_workspace.id,
+              projectId,
+              syncedIssue.id
+            );
+
+            await Promise.all(
+              swarmResult.spawned_tasks.map(async (spawnedTask, index) => {
+                const { persisted: childPersisted } = insertIssue({
+                  project_id: projectId,
+                  status_id: displayData.statusId,
+                  title: spawnedTask.task.title,
+                  description: spawnedTask.task.description,
+                  priority: null,
+                  sort_order: syncedIssue.sort_order,
+                  start_date: null,
+                  target_date: null,
+                  completed_at: null,
+                  parent_issue_id: syncedIssue.id,
+                  parent_issue_sort_order: index,
+                  extension_metadata: null,
+                });
+
+                const childIssue = await childPersisted;
+                await attemptsApi.linkToIssue(
+                  spawnedTask.workspace_id,
+                  projectId,
+                  childIssue.id
+                );
+              })
+            );
+          } else {
+            const task = await tasksApi.createAndStart({
+              task: {
+                project_id: workspaceDefaults.project_id,
+                title: displayData.title,
+                description: displayData.description,
+                status: null,
+                parent_workspace_id: null,
+                image_ids: null,
+              },
+              executor_profile_id: displayData.executorProfileId!,
+              repos,
+              linked_issue: linkedIssue,
+            });
+
+            const createdWorkspaces = await attemptsApi.getAll(task.id);
+            const workspaceId = createdWorkspaces[0]?.id;
+            if (workspaceId) {
+              await attemptsApi.linkToIssue(
+                workspaceId,
+                projectId,
+                syncedIssue.id
+              );
+            }
+          }
+
+          await Promise.all([
+            queryClient.invalidateQueries({ queryKey: taskKeys.all }),
+            queryClient.invalidateQueries({
+              queryKey: workspaceSummaryKeys.all,
+            }),
+          ]);
+
+          cancelDebouncedDraftIssue();
+          deleteDraftIssueScratch().catch(console.error);
+          openIssue(syncedIssue.id);
+          return;
+        }
+
         // Navigate to workspace creation if requested
         if (displayData.createDraftWorkspace) {
           const initialPrompt = buildWorkspaceCreatePrompt(
@@ -885,6 +1123,9 @@ export function KanbanIssuePanelContainer() {
       }
     } catch (error) {
       console.error('Failed to save issue:', error);
+      setSubmitError(
+        error instanceof Error ? error.message : t('kanban.issueCreateFailed')
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -902,10 +1143,12 @@ export function KanbanIssuePanelContainer() {
     workspaces,
     localWorkspaceIds,
     closeKanbanIssuePanel,
+    queryClient,
     cancelDebouncedDraftIssue,
     deleteDraftIssueScratch,
     getAttachmentIds,
     clearAttachments,
+    t,
   ]);
 
   const handleCmdEnterSubmit = useCallback(() => {
@@ -978,6 +1221,7 @@ export function KanbanIssuePanelContainer() {
       onFormChange={handlePropertyChange}
       statuses={sortedStatuses}
       tags={tags}
+      profiles={profiles}
       issueId={selectedKanbanIssueId}
       creatorUser={issueCreator}
       parentIssue={parentIssue}
@@ -1005,6 +1249,8 @@ export function KanbanIssuePanelContainer() {
       isUploading={isUploading}
       attachmentError={uploadError}
       onDismissAttachmentError={clearUploadError}
+      submitError={submitError}
+      onDismissSubmitError={() => setSubmitError(null)}
     />
   );
 }
