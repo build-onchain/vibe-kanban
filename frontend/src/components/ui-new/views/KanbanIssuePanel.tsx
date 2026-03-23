@@ -16,7 +16,11 @@ import type {
   Tag,
   PullRequestStatus,
 } from 'shared/remote-types';
-import type { OrganizationMemberWithProfile } from 'shared/types';
+import type {
+  ExecutorConfig,
+  ExecutorProfileId,
+  OrganizationMemberWithProfile,
+} from 'shared/types';
 import { IssuePropertyRow } from '@/components/ui-new/views/IssuePropertyRow';
 import { IssueTagsRow } from '@/components/ui-new/views/IssueTagsRow';
 import { PrimaryButton } from '@/components/ui-new/primitives/PrimaryButton';
@@ -35,8 +39,17 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { ErrorAlert } from '@/components/ui-new/primitives/ErrorAlert';
+import { ExecutorProfileSelector } from '@/components/settings';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Plus, X } from 'lucide-react';
 
 export type IssuePanelMode = 'create' | 'edit';
+
+export interface SwarmWorkerForm {
+  role: string;
+  executorProfileId: ExecutorProfileId | null;
+}
 
 export interface IssueFormData {
   title: string;
@@ -46,6 +59,10 @@ export interface IssueFormData {
   assigneeIds: string[];
   tagIds: string[];
   createDraftWorkspace: boolean;
+  autoStart: boolean;
+  executorProfileId: ExecutorProfileId | null;
+  swarmEnabled: boolean;
+  swarmWorkers: SwarmWorkerForm[];
 }
 
 export interface LinkedPullRequest {
@@ -69,6 +86,7 @@ export interface KanbanIssuePanelProps {
   // Options for dropdowns
   statuses: ProjectStatus[];
   tags: Tag[];
+  profiles?: Record<string, ExecutorConfig> | null;
 
   // Resolved assignee profiles for avatar display
   assigneeUsers?: OrganizationMemberWithProfile[];
@@ -117,6 +135,8 @@ export interface KanbanIssuePanelProps {
   isUploading?: boolean;
   attachmentError?: string | null;
   onDismissAttachmentError?: () => void;
+  submitError?: string | null;
+  onDismissSubmitError?: () => void;
 }
 
 export function KanbanIssuePanel({
@@ -149,6 +169,9 @@ export function KanbanIssuePanel({
   isUploading,
   attachmentError,
   onDismissAttachmentError,
+  submitError,
+  onDismissSubmitError,
+  profiles,
 }: KanbanIssuePanelProps) {
   const { t } = useTranslation('common');
   const isCreateMode = mode === 'create';
@@ -359,6 +382,173 @@ export function KanbanIssuePanel({
         {/* Create Draft Workspace Toggle (Create mode only) */}
         {isCreateMode && (
           <div className="p-base border-t">
+            {submitError && (
+              <ErrorAlert
+                message={submitError}
+                className="mb-base"
+                onDismiss={onDismissSubmitError}
+                dismissLabel={t('buttons.close')}
+              />
+            )}
+            <Toggle
+              checked={formData.autoStart}
+              onCheckedChange={(checked) => onFormChange('autoStart', checked)}
+              label={t('kanban.autoStart')}
+              description={t('kanban.autoStartDescription')}
+              disabled={isSubmitting}
+            />
+
+            {formData.autoStart && (
+              <div className="mt-base space-y-base rounded-sm border border-panel bg-panel/30 p-base">
+                <p className="text-sm text-low">
+                  {t('kanban.autoStartRepoHint')}
+                </p>
+
+                <div className="space-y-half">
+                  <p className="text-sm font-medium text-high">
+                    {formData.swarmEnabled
+                      ? t('kanban.swarmPlanner')
+                      : t('kanban.autoStartExecutor')}
+                  </p>
+                  <ExecutorProfileSelector
+                    profiles={profiles ?? null}
+                    selectedProfile={formData.executorProfileId}
+                    onProfileSelect={(profile) =>
+                      onFormChange('executorProfileId', profile)
+                    }
+                    disabled={isSubmitting}
+                    showLabel={false}
+                    className="flex min-w-0 flex-col gap-2 sm:flex-row"
+                    itemClassName="min-w-0 flex-1"
+                  />
+                </div>
+
+                <Toggle
+                  checked={formData.swarmEnabled}
+                  onCheckedChange={(checked) =>
+                    onFormChange('swarmEnabled', checked)
+                  }
+                  label={t('kanban.swarm.label')}
+                  description={t('kanban.swarm.description')}
+                  disabled={isSubmitting}
+                />
+
+                {formData.swarmEnabled && (
+                  <div className="space-y-base rounded-sm border border-panel bg-primary p-base">
+                    <div className="flex items-center justify-between gap-base">
+                      <div>
+                        <p className="text-sm font-medium text-high">
+                          {t('kanban.swarm.workersLabel')}
+                        </p>
+                        <p className="text-sm text-low">
+                          {t('kanban.swarm.workersHint')}
+                        </p>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() =>
+                          onFormChange('swarmWorkers', [
+                            ...formData.swarmWorkers,
+                            {
+                              role: '',
+                              executorProfileId:
+                                formData.swarmWorkers[0]?.executorProfileId ??
+                                formData.executorProfileId,
+                            },
+                          ])
+                        }
+                        disabled={isSubmitting}
+                      >
+                        <Plus className="mr-2 h-3.5 w-3.5" />
+                        {t('kanban.swarm.addWorker')}
+                      </Button>
+                    </div>
+
+                    <div className="space-y-base">
+                      {formData.swarmWorkers.map((worker, index) => (
+                        <div
+                          key={`issue-swarm-worker-${index}`}
+                          className="space-y-base rounded-sm border border-panel bg-panel/40 p-base"
+                        >
+                          <div className="flex items-center justify-between gap-base">
+                            <p className="text-xs font-medium uppercase tracking-wide text-low">
+                              {t('kanban.swarm.workerN', {
+                                count: index + 1,
+                              })}
+                            </p>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              onClick={() =>
+                                onFormChange(
+                                  'swarmWorkers',
+                                  formData.swarmWorkers.filter(
+                                    (_, workerIndex) => workerIndex !== index
+                                  )
+                                )
+                              }
+                              disabled={
+                                isSubmitting ||
+                                formData.swarmWorkers.length === 1
+                              }
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+
+                          <Input
+                            value={worker.role}
+                            onChange={(e) =>
+                              onFormChange(
+                                'swarmWorkers',
+                                formData.swarmWorkers.map(
+                                  (entry, workerIndex) =>
+                                    workerIndex === index
+                                      ? {
+                                          ...entry,
+                                          role: e.target.value,
+                                        }
+                                      : entry
+                                )
+                              )
+                            }
+                            placeholder={t('kanban.swarm.rolePlaceholder')}
+                            disabled={isSubmitting}
+                          />
+
+                          <ExecutorProfileSelector
+                            profiles={profiles ?? null}
+                            selectedProfile={worker.executorProfileId}
+                            onProfileSelect={(profile) =>
+                              onFormChange(
+                                'swarmWorkers',
+                                formData.swarmWorkers.map(
+                                  (entry, workerIndex) =>
+                                    workerIndex === index
+                                      ? {
+                                          ...entry,
+                                          executorProfileId: profile,
+                                        }
+                                      : entry
+                                )
+                              )
+                            }
+                            disabled={isSubmitting}
+                            showLabel={false}
+                            className="flex min-w-0 flex-col gap-2 sm:flex-row"
+                            itemClassName="min-w-0 flex-1"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             <Toggle
               checked={formData.createDraftWorkspace}
               onCheckedChange={(checked) =>
@@ -366,7 +556,8 @@ export function KanbanIssuePanel({
               }
               label={t('kanban.createDraftWorkspaceImmediately')}
               description={t('kanban.createDraftWorkspaceDescription')}
-              disabled={isSubmitting}
+              disabled={isSubmitting || formData.autoStart}
+              className="mt-base"
             />
           </div>
         )}
