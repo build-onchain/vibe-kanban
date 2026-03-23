@@ -4,7 +4,7 @@ The `remote` crate contains the implementation of the Vibe Kanban hosted API.
 
 ## Prerequisites
 
-Create a `.env.remote` file in the repository root:
+Create a `.env.remote` file in `crates/remote/`:
 
 ```env
 # Required — generate with: openssl rand -base64 48
@@ -28,7 +28,7 @@ Generate `VIBEKANBAN_REMOTE_JWT_SECRET` once using `openssl rand -base64 48` and
 ## Run the stack locally
 
 ```bash
-docker compose --env-file ../../.env.remote -f docker-compose.yml up --build
+docker compose --env-file .env.remote up --build
 ```
 
 This starts PostgreSQL, ElectricSQL, and the Remote Server. The web UI and API are exposed on `http://localhost:3000` (mapped from internal port 8081). Postgres is available at `postgres://remote:remote@localhost:5433/remote`.
@@ -96,7 +96,7 @@ Start Docker services as usual, then start Caddy in a separate terminal:
 ```bash
 # Terminal 1 — start the stack
 cd crates/remote
-docker compose --env-file ../../.env.remote -f docker-compose.yml up --build
+docker compose --env-file .env.remote up --build
 
 # Terminal 2 — start Caddy (from repo root)
 caddy run --config Caddyfile
